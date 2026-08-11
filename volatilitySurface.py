@@ -21,11 +21,21 @@ leading blank/title rows reads without an offset argument.
 
 Interpolation is BILINEAR and matches the reference workbook: linear in
 moneyness within each expiry column, then linear in calendar days between the
-two bracketing expiry columns. Outside the grid the surface CLAMPS (flat
-extrapolation) on both axes rather than running the linear slope on -- a
-linearly extrapolated normal vol can turn negative, which is not a price.
-Clamping is not evidenced by the reference workbook (its deal interpolates
-strictly inside the grid) and is flagged as an open item.
+two bracketing expiry columns.
+
+AN EXPIRY OUTSIDE THE OPTION-TERM AXIS reads the nearest end column. The
+deal's moneyness is interpolated down EVERY expiry column first, and the
+first (expiry before the grid) or last (expiry after it) of those values is
+the volatility -- flat, not the linear slope run on, which for a normal vol
+can turn negative and a negative vol is not a price.
+
+That is confirmed against RiskWatch rather than assumed. Two deals of the
+swaption book expire 3 and 1 days before the 2026-01-30 opening column of
+SWNVol-EUR-2Y; reading that column reproduces RiskWatch's own reported implied
+volatility to 0.005% and 0.0006%.
+
+The MONEYNESS axis clamps the same way and is NOT yet evidenced: no deal has
+priced outside the -0.05 .. +0.05 range, so that edge remains an open item.
 
 Targets Python 2.7 (no f-strings, explicit float division, object base).
 
@@ -82,16 +92,31 @@ class VolatilitySurface(object):
             [float(d.toordinal()) for d in self.expiries], dtype=float)
 
     def vol(self, expiry_date, moneyness):
-        '''Normal volatility at (expiry_date, moneyness), bilinear + clamped.'''
+        '''Normal volatility at (expiry_date, moneyness).
+
+        Step 1 puts the deal's moneyness into the grid as a row: its
+        volatility under every expiry column, linear in moneyness.
+
+        Step 2 reads the expiry off that row. An expiry inside the axis
+        interpolates linearly in calendar days between its two bracketing
+        columns. An expiry BEFORE the first column or AFTER the last takes
+        that end column's value outright -- the row is already the deal's own
+        moneyness, so the end column is the volatility, held flat rather than
+        extrapolated (see the module docstring).
+        '''
         t = float(pd.Timestamp(expiry_date).toordinal())
         m = float(moneyness)
 
-        # 1) collapse the moneyness axis inside every expiry column
+        # 1) the deal's moneyness as a row across the option-term axis
         by_expiry = np.array(
             [np.interp(m, self.moneyness, self.vols[:, j])
              for j in range(self.vols.shape[1])], dtype=float)
 
-        # 2) collapse the expiry axis
+        # 2) read the expiry off that row, end column outright when outside
+        if t <= self._expiry_days[0]:
+            return float(by_expiry[0])
+        if t >= self._expiry_days[-1]:
+            return float(by_expiry[-1])
         return float(np.interp(t, self._expiry_days, by_expiry))
 
     def is_inside(self, expiry_date, moneyness):
