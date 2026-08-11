@@ -267,6 +267,7 @@ _SHEET_CANON = {
     'volatilitysurface':    'vol_surface',
     'volatility':           'volatility_rw',
     'businessdayrule':      'business_day_rule',
+    'coupongenerationmethod': 'coupon_generation_method',
     'daycountbasis':        'day_count_basis',
     'calendaradjustment':   'calendar_adjustment',
     'lastresetrate':        'last_reset_rate',
@@ -603,6 +604,13 @@ class SwaptionPortfolio(object):
                 _u(fx.get('business_day_rule', '')).strip(),
             'float_business_day_rule':
                 _u(fl.get('business_day_rule', '')).strip(),
+            # Coupon Generation Method: which end the schedule is built from.
+            # Blank -> Forward, i.e. the legacy schedule (see
+            # preDeterminedSwapPricing.parse_coupon_generation).
+            'fixed_coupon_generation':
+                _u(fx.get('coupon_generation_method', '')).strip(),
+            'float_coupon_generation':
+                _u(fl.get('coupon_generation_method', '')).strip(),
             'float_index':       _u(fl.get('curve_index', '')).strip(),
             'float_spread':      to_spread(fl.get('float_spread'),
                                            self.spread_is_percent),
