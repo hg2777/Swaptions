@@ -47,6 +47,41 @@ from swaptionScenario import (CurveShockedSet, FixedVolSwaption,
 
 pd.set_option('display.max_columns', None)
 
+# A GIRR cell can be an ANALYTIC zero. Where a deal discounts and forecasts off
+# the SAME curve its float leg telescopes to N * (DF_start - DF_maturity), so a
+# vertex whose tent touches only INTERMEDIATE schedule dates cancels exactly:
+# each such date is one period's payment date and the next period's accrual
+# start, and the two occurrences cancel. P1273030's 0.5Y vertex is one -- its
+# tent reaches only 2026-07-31.
+#
+# Neither engine can print a clean zero there. The delta is a one-sided bump,
+# (V_shocked - V_base) / shock, so the subtraction cancels ~16 significant
+# figures of a PV and divides the residue by the shock: at 1bp on a 616k float
+# leg that leaves ~1e-5. The residue does not scale with the shock (it falls to
+# ~4e-9 at 500bp, where a real sensitivity would hold), which is what marks it
+# as arithmetic rather than risk.
+#
+# Dividing one engine's residue by the other's produces a meaningless
+# percentage -- -1.9e-05 against RiskWatch's +2.6e-05 reads as -173%. A cell is
+# therefore treated as an agreed zero when BOTH sides sit below this fraction
+# of the deal's own largest delta. At 1e-8 the floor is eight orders below the
+# deal's biggest exposure, so no cell carrying real risk can be masked by it.
+NEGLIGIBLE_REL_TOL = 1e-8
+
+
+def _agreed_zeros(out, rel_tol):
+    '''Set the error to 0.0 on cells where OUR delta and RiskWatch's are both
+    negligible against the deal's own largest delta -- an analytic zero that
+    both engines report as cancellation residue. Returns the row mask.'''
+    ours = pd.to_numeric(out['Delta-UAT'], errors='coerce').abs()
+    rw = pd.to_numeric(out['Delta-RiskWatch'], errors='coerce').abs()
+    scale = pd.concat([ours, rw], axis=1).max(axis=1).groupby(
+        out['ID']).transform('max')
+    floor = scale * float(rel_tol)
+    zero = (ours <= floor) & (rw <= floor) & rw.notna()
+    out.loc[zero, '(Delta-UAT/RW-1)%'] = 0.0
+    return zero
+
 
 def swaption_girr_delta_long(curves, surfaces, specs, tenor_table,
                              shock=ONE_BP, fx=None):
@@ -100,7 +135,8 @@ def swaption_girr_for_portfolio(port, tenor_days, tenor_labels, shock=ONE_BP):
 
 
 def swaption_girr_with_riskwatch(girr_long, rw_delta=None, sens_round=6,
-                                 pct_round=4):
+                                 pct_round=4, negligible_rel_tol=NEGLIGIBLE_REL_TOL,
+                                 verbose=True):
     '''
     GIRR delta with the RiskWatch comparison attached, matched on
     DealNum + curve + tenor:
@@ -109,6 +145,12 @@ def swaption_girr_with_riskwatch(girr_long, rw_delta=None, sens_round=6,
 
     rw_delta is {DealNum: {curve: {tenor_years: value}}}, read once for all
     three measures by swaptionSensitivity.load_rw_swaption_sensitivities.
+
+    Both delta columns are reported as computed. A cell where both sides are
+    negligible against the deal's own largest delta is an analytic zero that
+    neither engine can print cleanly, so its error is set to 0.0 rather than
+    left as one cancellation residue over another; the cells this touches are
+    listed when `verbose` (see NEGLIGIBLE_REL_TOL).
     '''
     if girr_long is None or len(girr_long) == 0:
         return girr_long
@@ -126,6 +168,14 @@ def swaption_girr_with_riskwatch(girr_long, rw_delta=None, sens_round=6,
                                [_rw(d, c, t) for d, c, t
                                 in zip(out['ID'], out['Curve'], out['Tenor'])],
                                sens_round, pct_round)
+
+        zero = _agreed_zeros(out, negligible_rel_tol)
+        if verbose and zero.any():
+            for _, r in out[zero].iterrows():
+                print("[swaptionGirr] {0} {1} {2}: analytic zero "
+                      "(UAT {3:.3e} / RW {4:.3e}) -> reconciled".format(
+                          r['ID'], r['Curve'], r['Tenor'],
+                          r['Delta-UAT'], r['Delta-RiskWatch']))
 
     out['_yrs'] = out['Tenor'].apply(safe_years)
     return (out.sort_values(['ID', 'Curve', '_yrs'], kind='mergesort')
