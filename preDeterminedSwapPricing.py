@@ -105,8 +105,11 @@ def _holiday_set(currencies=None):
 # ---------------------------------------------------------------------------
 # 'Business Day Rule' field: "Regular|Modified Following x-day (CalEUR)"
 #
-#   Regular / Modified : Modified rolls BACKWARD when the forward roll would
-#                        land in a later month; Regular always rolls forward.
+#   Regular / Modified : Modified rolls BACKWARD either when the forward roll
+#                        would land in a later month, or when the date itself
+#                        sits in the run of non-business days that OPENS its
+#                        month (see apply_business_day_rule); Regular always
+#                        rolls forward.
 #   x-day              : business days stepped on top of the roll. x=0 is the
 #                        next business day (the first business day on or after
 #                        the schedule date), x=1 the one after that, and so on.
@@ -145,6 +148,41 @@ def parse_business_day_rule(value, default_currency=None):
     return modified, offset, calendar
 
 
+# ---------------------------------------------------------------------------
+# 'Coupon Generation Method' field: Forward | Backward
+#
+#   Forward  : boundaries step FORWARD from the leg's Real Start Date and the
+#              schedule ends on the maturity date (_schedule_boundaries).
+#   Backward : boundaries step BACKWARD from the maturity date and the
+#              schedule opens on the leg's Real Start Date
+#              (_schedule_boundaries_backward).
+#
+# A blank / missing field is Forward, so a workbook without the column keeps
+# the legacy schedule.
+# ---------------------------------------------------------------------------
+COUPON_GENERATION_BACKWARD = ('backward', 'backwards', 'back', 'b')
+COUPON_GENERATION_FORWARD = ('forward', 'forwards', 'fwd', 'f', '')
+
+
+def parse_coupon_generation(value):
+    '''"Backward" -> True, "Forward" / blank -> False.
+
+    An unrecognised value is rejected rather than silently defaulted: a
+    schedule generated from the wrong end is not a difference a reconciliation
+    would attribute correctly.
+    '''
+    s = u'{0}'.format('' if value is None else value).strip().lower()
+    if s in ('nan', 'none'):
+        s = ''
+    if s in COUPON_GENERATION_BACKWARD:
+        return True
+    if s in COUPON_GENERATION_FORWARD:
+        return False
+    raise ValueError(
+        "Coupon Generation Method {0!r} is neither 'Forward' nor "
+        "'Backward'".format(value))
+
+
 def _business_day(d, holidays, step_days, offset=0):
     '''First business day on or after (step_days +1) / on or before (-1) `d`,
     then `offset` further business days in that same direction.'''
@@ -158,19 +196,55 @@ def _business_day(d, holidays, step_days, offset=0):
     return d
 
 
+def _opens_the_month(d, holidays):
+    '''
+    True when `d` is a non-business day AND every day from the 1st of its
+    month up to `d` is a non-business day too -- i.e. `d` sits inside the
+    unbroken run of weekend/holiday dates that OPENS the month, with no
+    business day yet behind it in that month.
+
+    2026-08-02 (Sunday) qualifies: 2026-08-01 is a Saturday, so the month has
+    not opened for business. 2026-08-03 (Monday) does not -- it is itself a
+    business day. A holiday on the 4th does not either, because the 3rd was a
+    business day and the run is broken.
+    '''
+    probe = pd.Timestamp(d).normalize()
+    first = probe.replace(day=1)
+    step = pd.Timedelta(days=1)
+    while probe >= first:
+        if probe.weekday() < 5 and probe not in holidays:
+            return False
+        probe = probe - step
+    return True
+
+
 def apply_business_day_rule(dt, holidays, modified=False, offset=0):
     '''Roll one schedule date under the Business Day Rule.
 
     Forward branch: the next business day (first business day on or after
-    `dt`), then `offset` further business days forward. Under Modified, if
-    that result falls in a later month the roll is taken BACKWARD instead --
-    the previous business day, then `offset` business days back. Regular
-    always keeps the forward result.
+    `dt`), then `offset` further business days forward. Regular always keeps
+    that result.
+
+    Under Modified the roll is taken BACKWARD instead -- the previous business
+    day, then `offset` business days back -- in either of two cases:
+
+      1. the forward result falls in a LATER month (the classic Modified
+         Following roll-back), or
+      2. `dt` sits in the run of non-business days that OPENS its month
+         (_opens_the_month), so rolling forward would carry a date belonging
+         to the turn of the month into the new month rather than settling it
+         on the old month's last business day.
+
+    Case 2 fires where case 1 cannot: a date on the 1st or 2nd rolls forward
+    WITHIN its own month, so the later-month test never trips. 2026-08-02 is a
+    Sunday behind a Saturday 1st, and settles on Friday 2026-07-31 rather than
+    Monday 2026-08-03.
     '''
     d = pd.Timestamp(dt).normalize()
 
     forward = _business_day(d, holidays, 1, offset)
-    if modified and (forward.year, forward.month) != (d.year, d.month):
+    if modified and ((forward.year, forward.month) != (d.year, d.month)
+                     or _opens_the_month(d, holidays)):
         return _business_day(d, holidays, -1, offset)
     return forward
 
@@ -312,6 +386,48 @@ class Swap:
         boundaries.append(maturity)          # ascending: real start ... maturity
         return boundaries
 
+    def _schedule_boundaries_backward(self, term_years, real_start_date):
+        '''Period boundaries generated BACKWARD from the maturity date.
+
+        The schedule is anchored on the MATURITY date and steps one
+        `term_years` period back at a time, every boundary carrying the day of
+        the maturity date (clamped into shorter months by _on_day). Each
+        boundary is subtracted from the maturity date itself rather than from
+        the previous boundary, so a month-end anchor cannot drift.
+
+        Stepping stops once a subtraction reaches the leg's Real Start Date:
+        the opening boundary is the LATER of that last subtraction and the
+        real start date, so the schedule can never open before the leg does.
+        Where the subtraction lands short of the real start date the opening
+        period is a front stub; where it lands exactly on it every period is
+        regular.
+
+        The boundaries returned are UNADJUSTED schedule dates, as for the
+        forward generator; _build_leg rolls them under the leg's Business Day
+        Rule to get the payment dates.
+        '''
+        start = pd.Timestamp(real_start_date)
+        maturity = pd.Timestamp(self.params['maturity_date'])
+        months = int(round(float(term_years) * 12))
+        if months <= 0:
+            return [start, maturity]
+
+        day = maturity.day
+        boundaries = [maturity]
+        i = 1
+        while True:
+            prev = _on_day(maturity - DateOffset(months=months * i), day)
+            if prev <= start:
+                break
+            boundaries.append(prev)
+            i += 1
+
+        # the opening boundary: the later of the last subtraction and the
+        # leg's own start date
+        boundaries.append(max(prev, start))
+        boundaries.reverse()                 # ascending: real start ... maturity
+        return boundaries
+
     def _build_leg(self, leg):
         '''Schedule + accrual for one leg (cash flows still to settle).
 
@@ -326,6 +442,8 @@ class Swap:
             adjust = bool(self.params.get('fixed_calendar_adjustment', False))
             rule = self.params.get('fixed_business_day_rule')
             real_start = pd.Timestamp(self.params['fixed_real_start_date'])
+            backward = parse_coupon_generation(
+                    self.params.get('fixed_coupon_generation'))
             # fixed leg: the first cash flow always matches the maturity day
             match_maturity_day = True
         else:
@@ -333,14 +451,22 @@ class Swap:
             adjust = bool(self.params.get('float_calendar_adjustment', False))
             rule = self.params.get('float_business_day_rule')
             real_start = pd.Timestamp(self.params['float_real_start_date'])
+            backward = parse_coupon_generation(
+                    self.params.get('float_coupon_generation'))
             # float leg: a real start day PAST the maturity day puts the stub
             # at the front (first cash flow runs to the maturity day); a real
             # start day BEFORE it puts the stub at the back (final cash flow
             # runs on to maturity).
             match_maturity_day = real_start.day > maturity.day
 
-        boundaries = self._schedule_boundaries(term, real_start,
-                                               match_maturity_day)
+        # Coupon Generation Method picks which end the schedule is built from.
+        # Backward is anchored on the maturity date, so the stub placement
+        # rules of the forward generator (match_maturity_day) do not apply.
+        if backward:
+            boundaries = self._schedule_boundaries_backward(term, real_start)
+        else:
+            boundaries = self._schedule_boundaries(term, real_start,
+                                                   match_maturity_day)
         # The Business Day Rule names its own calendar (CalEUR / CalUSD /
         # CalGBP); the Currency field is only the fallback for a leg whose
         # rule is blank.
