@@ -131,8 +131,12 @@ def _girr_blocks(xl, row, curves, names, valuation_date, tenor_table,
     return row + 1
 
 
-def _curvature_blocks(xl, row, curves, surfaces, specs, names, shift):
-    '''Shifted curve nodes per altered curve, then the per-deal CVR trace.'''
+def _curvature_blocks(xl, row, curves, surfaces, specs, names, shift,
+                      non_risk_curves=()):
+    '''Shifted curve nodes per altered curve, then the per-deal CVR trace.
+
+    Mirrors swaptionCurvature: a curve the deal reads that is not a GIRR risk
+    factor stays still, so this trace and the Curvature tab agree.'''
     row = _section(xl, row, 'CURVATURE : parallel shift of {0:.10f} on every '
                             'curve of the currency'.format(shift))
 
@@ -150,10 +154,11 @@ def _curvature_blocks(xl, row, curves, surfaces, specs, names, shift):
     rows = []
     for spec in specs:
         params, vol = spec['params'], spec['base_vol']
+        shifted_curves = physical_curves(params, non_risk_curves)
         base = FixedVolSwaption(curves, surfaces, params, vol).npv()
-        up = FixedVolSwaption(ParallelShockedSet(curves, shift),
+        up = FixedVolSwaption(ParallelShockedSet(curves, shift, shifted_curves),
                               surfaces, params, vol).npv()
-        down = FixedVolSwaption(ParallelShockedSet(curves, -shift),
+        down = FixedVolSwaption(ParallelShockedSet(curves, -shift, shifted_curves),
                                 surfaces, params, vol).npv()
         rows.append([spec['id'], params.get('currency', ''), vol,
                      round(base, 2), round(up, 2), round(down, 2),
@@ -208,7 +213,7 @@ def write_swaption_sensitivity_diagnostics(
         path, port, tenor_days, tenor_labels, method='linear',
         girr_shock=ONE_BP, curvature_shock=CURVATURE_SHOCK,
         vega_tenor_days=VEGA_TENOR_DAYS, vega_tenor_labels=VEGA_TENOR_LABELS,
-        vega_rel_shock=VEGA_REL_SHOCK, verbose=True):
+        vega_rel_shock=VEGA_REL_SHOCK, non_risk_curves=(), verbose=True):
     '''
     Build the two-tab sensitivity diagnostics workbook for the priced
     swaption book.
@@ -281,7 +286,7 @@ def write_swaption_sensitivity_diagnostics(
         r = _girr_blocks(xl, r, curves, names, port.valuation_date,
                          tenor_table, method, girr_shock)
         r = _curvature_blocks(xl, r, curves, surfaces, specs, names,
-                              curvature_shock)
+                              curvature_shock, non_risk_curves)
         r = _vega_blocks(xl, r, curves, surfaces, specs, vega_tenor_days,
                          vega_tenor_labels, vega_rel_shock)
 
