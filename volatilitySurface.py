@@ -222,12 +222,29 @@ class SurfaceSet(object):
             return False
         return True
     
+    def reason(self, name):
+        '''Why `name` failed to load, as recorded by has().
+
+        has() already stores the exception text against the tab name in
+        self.errors; this is the read side of that, so a caller skipping a
+        deal can say WHY the surface is missing rather than only that it is.
+        Returns '' for a surface that loaded, and asks has() first for a name
+        not yet attempted, so the answer never depends on call order.
+        '''
+        key = u'{0}'.format(name).strip()
+        if key not in self.surfaces and key not in self.errors:
+            self.has(key)                    # attempt it, so the answer is
+        if key in self.surfaces:             # independent of call order
+            return ''
+        return self.errors.get(key, 'not loaded')
+
     def surface(self, name):
         key = u'{0}'.format(name).strip()
         if not self.has(key):
             raise KeyError(
-                'Volatility surface {0} not loaded. Current surfaces: '
-                '{1}'.format(key, self.path, sorted(self.surfaces)))
+                'Volatility surface {0} not loaded ({1}). Workbook: {2}. '
+                'Current surfaces: {3}'.format(
+                    key, self.reason(key), self.path, sorted(self.surfaces)))
         return self.surfaces[key]
 
     def vol(self, name, expiry_date, moneyness):
