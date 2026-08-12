@@ -169,8 +169,8 @@ def swaption_sensitivities(port, girr_tenor_days, girr_tenor_labels,
     the RiskWatch comparison to each and print the summary.
 
     non_risk_curves names curves a deal may READ without them being GIRR risk
-    factors. They are excluded from the CURVATURE shift; the GIRR delta pass
-    still reports a row per curve the deal reads.
+    factors. They are excluded from BOTH the curvature shift and the GIRR
+    delta pass, which emits no tenor row for such a curve.
 
     Returns (girr, curvature, vega) as long-format DataFrames, each carrying
     its RiskWatch and error columns when a report was supplied.
@@ -183,13 +183,14 @@ def swaption_sensitivities(port, girr_tenor_days, girr_tenor_labels,
         print("  curvature : {0:.10f} parallel shift on the currency's "
               "risk-factor curves".format(curvature_shock))
         if non_risk_curves:
-            print("  not GIRR risk factors, never shifted : {0}".format(
+            print("  not GIRR risk factors, never shocked : {0}".format(
                 list(non_risk_curves)))
         print("  vega      : sigma -> sigma * {0} spread over {1} x "
               "{1}".format(1.0 + vega_rel_shock, list(vega_tenor_labels)))
 
     girr = swaption_girr_for_portfolio(port, girr_tenor_days,
-                                       girr_tenor_labels, shock=girr_shock)
+                                       girr_tenor_labels, shock=girr_shock,
+                                       non_risk_curves=non_risk_curves)
     curvature = swaption_curvature_for_portfolio(
         port, shock=curvature_shock, non_risk_curves=non_risk_curves)
     vega = swaption_vega_for_portfolio(port, grid_days=vega_tenor_days,
