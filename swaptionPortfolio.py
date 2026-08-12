@@ -506,20 +506,41 @@ class SwaptionPortfolio(object):
                        leg, self.calendar_adjustment_default))
         return self.calendar_adjustment_default
 
-    def _maturity(self, op, fx, fl, deal_num):
+    def _maturity(self, fx, fl, deal_num):
         '''Underlying swap maturity: the Float tab's Maturity Date, else the
-        Fixed tab's, else the final date of the notional schedule.'''
+        Fixed tab's.
+
+        The Swaption tab carries no notional row, so its notional schedule is
+        no longer available as a last-resort source of the final date; a deal
+        with no Maturity Date on either leg tab is a blotter error and is
+        raised rather than inferred.
+        '''
         for rec, tab in ((fl, 'Float'), (fx, 'Fixed')):
             raw = rec.get('maturity_date')
             if not _is_blank(raw):
                 return pd.Timestamp(pd.to_datetime(raw)), tab
-        final = parse_notional_field(op.get('notional_field'))[2]
-        if final is not None:
+        raise ValueError(
+            'No Maturity Date on either leg tab for deal {0}'.format(deal_num))
+
+    def _notional(self, fx, fl, deal_num):
+        '''Underlying notional, taken from the FIXED leg.
+
+        The Swaption tab carries no notional row: the option and its
+        underlying are the same trade, so the notional is the legs' own. The
+        fixed leg's is used and a float leg quoting a different amount is
+        flagged rather than silently dropped, mirroring _discount_curve.
+        '''
+        fixed_n = parse_notional_field(fx.get('notional_field'))[0]
+        try:
+            float_n = parse_notional_field(fl.get('notional_field'))[0]
+        except Exception:
+            float_n = None
+        if float_n is not None and float_n != fixed_n:
             self._warn(deal_num,
-                       'no Maturity Date on the leg tabs -> taken from the '
-                       "swaption's notional schedule ({0:%Y-%m-%d})".format(final))
-            return final, 'Swaption notional schedule'
-        raise ValueError('No maturity date for deal {0}'.format(deal_num))
+                       'legs quote different notionals ({0:,.2f} fixed / '
+                       '{1:,.2f} float); priced on the fixed leg'.format(
+                           fixed_n, float_n))
+        return fixed_n
 
     def _discount_curve(self, fx, fl, deal_num):
         '''One discount curve drives both legs of the underlying. The fixed
@@ -537,8 +558,8 @@ class SwaptionPortfolio(object):
         '''Translate a matched swaption/fixed/float triple into a Swaption
         params dict.'''
         deal_num = op['deal_num']
-        notional = parse_notional_field(op.get('notional_field'))[0]
-        maturity, _ = self._maturity(op, fx, fl, deal_num)
+        notional = self._notional(fx, fl, deal_num)
+        maturity, _ = self._maturity(fx, fl, deal_num)
 
         expiry = pd.Timestamp(pd.to_datetime(op['maturity_date']))
         fixed_start = pd.Timestamp(pd.to_datetime(fx['real_start_date']))
@@ -690,8 +711,20 @@ class SwaptionPortfolio(object):
             # currency). No FX converter -> factor 1.0, so a EUR book is
             # unchanged. The annuity, yield, moneyness, vol and h are rates or
             # year fractions and are currency-free.
-            fx_factor = (self.fx.factor(params['currency'])
-                         if self.fx is not None else 1.0)
+            #
+            # A currency the 'FX rates' tab does not quote skips THAT DEAL with
+            # a recorded reason; it must not take the rest of the book down
+            # with it, and the deal must not be reported in its own currency
+            # beside deals restated into EUR -- a column mixing units is worse
+            # than a missing row.
+            try:
+                fx_factor = (self.fx.factor(params['currency'])
+                             if self.fx is not None else 1.0)
+            except KeyError as e:
+                self.skipped.append((params['deal_num'],
+                                     'no FX rate to the reporting currency: '
+                                     '{0}'.format(e)))
+                continue
             float_pv = float_pv * fx_factor
             mtm = mtm * fx_factor
 
