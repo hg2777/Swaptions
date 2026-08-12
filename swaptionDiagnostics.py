@@ -122,8 +122,24 @@ def _vol_interpolation_table(swaption):
     return pd.DataFrame(rows)
 
 
-def _steps_table(swaption):
-    '''The four pricing steps as a two-column label/value table.'''
+def _fx_factor(swaption, fx):
+    '''Factor taking this deal's currency to the reporting currency.
+
+    A currency the 'FX rates' tab does not quote returns NaN rather than
+    raising: the diagnostics workbook must still be written for a deal whose
+    FX is missing -- that is exactly the deal someone is trying to trace.
+    '''
+    if fx is None:
+        return 1.0
+    try:
+        return fx.factor(swaption.params.get('currency', ''))
+    except KeyError:
+        return float('nan')
+
+
+def _steps_table(swaption, fx_factor=1.0):
+    '''The four pricing steps as a two-column label/value table, in the deal's
+    own currency, with the FX factor and converted MtM appended.'''
     steps = swaption.steps()
     labels = [
         ('Step 1  Float Leg NPV', 'Float Leg PV'),
@@ -146,6 +162,17 @@ def _steps_table(swaption):
                              ('Value', swaption.position())]))
     rows.append(OrderedDict([('Step', 'Notional'),
                              ('Value', swaption.notional)]))
+    # The trace above is in the DEAL's own currency, because that is the
+    # currency the pricer works in: converting the intermediate steps would
+    # stop them reconciling to each other. The results workbook reports in the
+    # EUR reporting currency, so the factor and the converted MtM are given
+    # here to tie the two together.
+    rows.append(OrderedDict([('Step', 'Currency'),
+                             ('Value', swaption.params.get('currency', ''))]))
+    rows.append(OrderedDict([('Step', 'FX factor to reporting currency'),
+                             ('Value', fx_factor)]))
+    rows.append(OrderedDict([('Step', 'MtM (reporting currency)'),
+                             ('Value', swaption.npv() * fx_factor)]))
     rows.append(OrderedDict([('Step', 'Volatility interpolated (not clamped)'),
                              ('Value', swaption.vol_is_interpolated())]))
     return pd.DataFrame(rows)
@@ -163,20 +190,28 @@ def write_swaption_diagnostics(path, portfolio):
         print('No priced swaptions -- diagnostics workbook not written.')
         return
 
+    fx = getattr(portfolio, 'fx', None)
+
     summary_rows = []
     for deal_num, swo in swaptions.items():
+        factor = _fx_factor(swo, fx)
         row = OrderedDict([('DealNum', deal_num),
+                           ('Currency', swo.params.get('currency', '')),
                            ('Option', swo.option_type()),
                            ('Notional', swo.notional),
                            ('Expiry', swo.expiry)])
         row.update(swo.steps())
+        # steps() is in the deal's currency; the results workbook is in the
+        # reporting currency, so both are carried side by side.
+        row['FX to reporting'] = factor
+        row['MtM (reporting)'] = swo.npv() * factor
         summary_rows.append(row)
 
     with pd.ExcelWriter(path) as xl:
         pd.DataFrame(summary_rows).to_excel(xl, sheet_name='Summary',
                                             index=False, na_rep='N/A')
         for deal_num, swo in swaptions.items():
-            _steps_table(swo).to_excel(
+            _steps_table(swo, _fx_factor(swo, fx)).to_excel(
                 xl, sheet_name=_sheet_name('Steps_', deal_num),
                 index=False, na_rep='N/A')
             _leg_table(swo, 'float').to_excel(
