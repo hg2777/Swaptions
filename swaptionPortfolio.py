@@ -46,7 +46,7 @@ from collections import OrderedDict
 
 import pandas as pd
 
-from swaptionPricing import Swaption
+from swaptionPricing import Swaption, position_sign
 
 pd.set_option('display.max_columns', None)
 pd.set_option('display.width', 200)
@@ -268,6 +268,8 @@ _SHEET_CANON = {
     'volatility':           'volatility_rw',
     'businessdayrule':      'business_day_rule',
     'coupongenerationmethod': 'coupon_generation_method',
+    'sellerbuyer':          'position_side',
+    'buyerseller':          'position_side',
     'daycountbasis':        'day_count_basis',
     'calendaradjustment':   'calendar_adjustment',
     'lastresetrate':        'last_reset_rate',
@@ -628,6 +630,10 @@ class SwaptionPortfolio(object):
             # Coupon Generation Method: which end the schedule is built from.
             # Blank -> Forward, i.e. the legacy schedule (see
             # preDeterminedSwapPricing.parse_coupon_generation).
+            # Seller/Buyer: Long | Short. Short flips the sign of every
+            # reported figure (swaptionScenario.parse_position_side). Blank ->
+            # Long, so a workbook without the column is unchanged.
+            'position_side': _u(op.get('position_side', '')).strip(),
             'fixed_coupon_generation':
                 _u(fx.get('coupon_generation_method', '')).strip(),
             'float_coupon_generation':
@@ -727,8 +733,17 @@ class SwaptionPortfolio(object):
                                      'no FX rate to the reporting currency: '
                                      '{0}'.format(e)))
                 continue
+            # A short position is the same option from the writer's side, so
+            # the reported MtM carries the opposite sign. The float leg PV is
+            # an intermediate of the pricing, not a reported result, so it is
+            # restated into the reporting currency but NOT signed.
+            try:
+                sign = position_sign(params)
+            except ValueError as e:
+                self.skipped.append((params['deal_num'], u'{0}'.format(e)))
+                continue
             float_pv = float_pv * fx_factor
-            mtm = mtm * fx_factor
+            mtm = mtm * fx_factor * sign
 
             row = OrderedDict([
                 ('DealNum',        params['deal_num']),
