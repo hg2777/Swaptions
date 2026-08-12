@@ -74,8 +74,19 @@ GIRR_TENOR_LABELS = ('0.25Y', '0.5Y', '1Y', '2Y', '3Y', '5Y',
 GIRR_TENOR_DAYS   = (90, 181, 365, 730, 1096, 1826, 3652, 5479, 7305, 10957)
 GIRR_SHOCK        = 0.0001   # 1bp bump-and-reprice shock
 
-# Curvature: parallel shift applied to every curve of the deal's currency.
+# Curvature: parallel shift applied to the deal's risk-factor curves.
 CURVATURE_SHOCK   = 0.017 / (2.0 ** 0.5)
+
+# Curves a deal may READ without them being GIRR risk factors, so the
+# curvature shift leaves them still. 'EUR-SWP-1M' is one: it appears nowhere
+# among the 42 GIRR Risk Factor IDs of the FRTB SA report, and for the deal
+# that forecasts off it RiskWatch publishes EUR-SWP delta rows only. Shifting
+# the discount curve alone reproduces its curvature exactly; shifting the
+# forecast curve too misses by 2300%.
+# The GIRR delta pass is NOT filtered by this list -- it still shocks every
+# curve the deal reads and reports a row per curve, so a computed sensitivity
+# is never dropped; the rows for these curves reconcile to N/A.
+NON_RISK_FACTOR_CURVES = ('EUR-SWP-1M',)
 
 # Vega: the SA FRTB standard tenors, shared by the option-term and the
 # swap-duration axis, and the relative volatility shock.
@@ -199,6 +210,7 @@ def main():
             vega_tenor_days=VEGA_TENOR_DAYS,
             vega_tenor_labels=VEGA_TENOR_LABELS,
             vega_rel_shock=VEGA_REL_SHOCK,
+            non_risk_curves=NON_RISK_FACTOR_CURVES,
             rw_report_csv=SWAPTION_RW_MTM_CSV)
 
     write_results(mtm, girr, curvature, vega)
@@ -218,7 +230,8 @@ def main():
             curvature_shock=CURVATURE_SHOCK,
             vega_tenor_days=VEGA_TENOR_DAYS,
             vega_tenor_labels=VEGA_TENOR_LABELS,
-            vega_rel_shock=VEGA_REL_SHOCK)
+            vega_rel_shock=VEGA_REL_SHOCK,
+            non_risk_curves=NON_RISK_FACTOR_CURVES)
 
     return mtm, girr, curvature, vega
 
