@@ -680,8 +680,10 @@ class SwaptionPortfolio(object):
                 continue
             if not self.surfaces.has(params['vol_surface_name']):
                 self.skipped.append(
-                    (params['deal_num'], 'volatility surface {0!r} not loaded: '
-                     '-- {1}'.format(params['vol_surface_name'], self.surfaces.reason(params['vol_surface_name']))))
+                    (params['deal_num'],
+                     'volatility surface {0!r} not loaded: {1}'.format(
+                         params['vol_surface_name'],
+                         self.surfaces.reason(params['vol_surface_name']))))
                 continue
 
             err = ''
