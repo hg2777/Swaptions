@@ -55,8 +55,9 @@ from collections import OrderedDict
 
 import pandas as pd
 
-from swaptionScenario import (FixedVolSwaption, attach_riskwatch,
-                              build_swaption_specs, fx_factor, safe_years,
+from swaptionScenario import (NEGLIGIBLE_ABS_TOL, FixedVolSwaption,
+                              attach_riskwatch, build_swaption_specs,
+                              negligible_agreed, reporting_factor, safe_years,
                               swaption_rw_id)
 
 pd.set_option('display.max_columns', None)
@@ -135,7 +136,7 @@ def swaption_vega_long(curves, surfaces, specs, grid_days=VEGA_TENOR_DAYS,
     for spec in specs:
         params = spec['params']
         vol = spec['base_vol']
-        factor = fx_factor(fx, params)
+        factor = reporting_factor(fx, params)
 
         option_days, duration_days = vega_axes(params)
 
@@ -179,8 +180,105 @@ def swaption_vega_for_portfolio(port, grid_days=VEGA_TENOR_DAYS,
                               fx=getattr(port, 'fx', None))
 
 
+def _fold_target(cell, rw_cells):
+    """The RiskWatch cell an unmatched cell of ours folds into.
+
+    RiskWatch can report a COARSER vega grid than we compute: where its
+    surface quotes fewer option-term or swap-duration nodes, several of our
+    cells belong to one of its. An unmatched cell folds into the RiskWatch
+    cell that shares EITHER its option term OR its swap duration -- neither
+    axis takes precedence, because nothing in the report establishes that one
+    should.
+
+    E.g. we compute 1Y x 5Y and 1Y x 10Y where RiskWatch quotes 1Y x 5Y only:
+    1Y x 10Y shares the 1Y option term, so the two vegas are summed onto it.
+
+    Returns (target, '') when exactly one cell shares an axis, and
+    (None, reason) otherwise -- either because no reported cell shares one, or
+    because several do and the cell has no determined home. Picking among them
+    would be a guess, so such a cell is left as its own row and reported.
+    """
+    o, d = cell
+    candidates = [k for k in rw_cells if k[0] == o or k[1] == d]
+    if len(candidates) == 1:
+        return candidates[0], ''
+    if not candidates:
+        return None, 'no reported cell shares its option term or duration'
+    return None, 'shares an axis with {0} reported cells'.format(
+        len(candidates))
+
+
+def _fold_to_riskwatch_grid(out, rw_vega, sens_round, verbose=True):
+    """Aggregate our vega cells onto the cells RiskWatch actually reports.
+
+    Returns the table re-keyed on the RiskWatch grid, one row per reported
+    cell, carrying the summed vega and the cells that were folded into it.
+    A deal RiskWatch does not report at all passes through untouched, so its
+    computed cells are still shown.
+    """
+    kept, ambiguous = [], []
+    for (deal, surface), block in out.groupby(['ID', 'Surface'], sort=False):
+        rw_cells = rw_vega.get(swaption_rw_id(deal), {}).get(surface, {})
+        if not rw_cells:
+            kept.append(block)              # nothing to fold onto
+            continue
+
+        targets, sources = [], {}
+        for _, r in block.iterrows():
+            cell = (round(safe_years(r['Option Term']), 6),
+                    round(safe_years(r['Swap Duration']), 6))
+            if cell in rw_cells:
+                tgt = cell
+            else:
+                tgt, why = _fold_target(cell, rw_cells)
+                if tgt is None:
+                    # no determined home: keep the cell on its own key so the
+                    # vega is neither lost nor merged into a guess
+                    tgt = cell
+                    ambiguous.append('{0} {1}x{2}: {3}'.format(
+                        deal, r['Option Term'], r['Swap Duration'], why))
+            targets.append(tgt)
+            if tgt != cell:
+                sources.setdefault(tgt, []).append(
+                    '{0}x{1}'.format(r['Option Term'], r['Swap Duration']))
+
+        block = block.copy()
+        block['_target'] = targets
+        rows = []
+        for tgt, grp in block.groupby('_target', sort=False):
+            row = grp.iloc[0].copy()
+            # the row now describes the RiskWatch cell, not ours
+            row['Option Term'] = grp.iloc[0]['Option Term'] \
+                if len(grp) == 1 else _label_for(grp, 'Option Term', tgt, 0)
+            row['Swap Duration'] = grp.iloc[0]['Swap Duration'] \
+                if len(grp) == 1 else _label_for(grp, 'Swap Duration', tgt, 1)
+            row['Vega-UAT'] = round(grp['Vega-UAT'].sum(), sens_round)
+            row['Folded From'] = ', '.join(sources.get(tgt, []))
+            rows.append(row)
+        kept.append(pd.DataFrame(rows))
+
+    if verbose and ambiguous:
+        for a in ambiguous:
+            print('[swaptionVega] {0} -- left unfolded'.format(a))
+
+    out = pd.concat(kept, ignore_index=True)
+    if 'Folded From' not in out.columns:
+        out['Folded From'] = ''
+    out['Folded From'] = out['Folded From'].fillna('')
+    return out.drop(columns='_target', errors='ignore')   # scratch key
+
+
+def _label_for(grp, col, target, axis):
+    """The label in `grp` whose year value matches the target cell on `axis`;
+    falls back to the first label if none does."""
+    for _, r in grp.iterrows():
+        if round(safe_years(r[col]), 6) == target[axis]:
+            return r[col]
+    return grp.iloc[0][col]
+
+
 def swaption_vega_with_riskwatch(vega_long, rw_vega=None, sens_round=6,
-                                 pct_round=4):
+                                 pct_round=4, verbose=True):
     '''
     Vega with the RiskWatch comparison attached, matched on
     DealNum + surface + (option term, swap duration):
@@ -200,6 +298,10 @@ def swaption_vega_with_riskwatch(vega_long, rw_vega=None, sens_round=6,
     out['Vega-UAT'] = out['Vega-UAT'].round(sens_round)
 
     if rw_vega is not None:
+        # Fold our grid onto RiskWatch's before comparing: where it reports
+        # fewer cells than we compute, several of ours sum into one of its.
+        out = _fold_to_riskwatch_grid(out, rw_vega, sens_round, verbose)
+
         def _rw(did, surface, option, duration):
             key = (round(safe_years(option), 6), round(safe_years(duration), 6))
             return rw_vega.get(swaption_rw_id(did), {}).get(
@@ -211,6 +313,9 @@ def swaption_vega_with_riskwatch(vega_long, rw_vega=None, sens_round=6,
                                        out['Option Term'],
                                        out['Swap Duration'])],
                                sens_round, pct_round)
+        out.loc[negligible_agreed(out['Vega-UAT'], out['Vega-RiskWatch'],
+                                  NEGLIGIBLE_ABS_TOL),
+                '(Vega-UAT/RW-1)%'] = 0.0
 
     out['_o'] = out['Option Term'].apply(safe_years)
     out['_d'] = out['Swap Duration'].apply(safe_years)
