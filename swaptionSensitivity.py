@@ -162,10 +162,15 @@ def swaption_sensitivities(port, girr_tenor_days, girr_tenor_labels,
                            vega_tenor_days=VEGA_TENOR_DAYS,
                            vega_tenor_labels=VEGA_TENOR_LABELS,
                            vega_rel_shock=VEGA_REL_SHOCK,
+                           non_risk_curves=(),
                            rw_report_csv=None, verbose=True):
     '''
     Run the three measures over an already-priced SwaptionPortfolio, attach
     the RiskWatch comparison to each and print the summary.
+
+    non_risk_curves names curves a deal may READ without them being GIRR risk
+    factors. They are excluded from the CURVATURE shift; the GIRR delta pass
+    still reports a row per curve the deal reads.
 
     Returns (girr, curvature, vega) as long-format DataFrames, each carrying
     its RiskWatch and error columns when a report was supplied.
@@ -175,14 +180,18 @@ def swaption_sensitivities(port, girr_tenor_days, girr_tenor_labels,
         print("SWAPTION : FRTB SA sensitivities + RiskWatch comparison")
         print("  GIRR      : {0}bp tent shock per physical curve on "
               "{1}".format(girr_shock * 10000.0, list(girr_tenor_labels)))
-        print("  curvature : {0:.10f} parallel shift on every curve of the "
-              "currency".format(curvature_shock))
+        print("  curvature : {0:.10f} parallel shift on the currency's "
+              "risk-factor curves".format(curvature_shock))
+        if non_risk_curves:
+            print("  not GIRR risk factors, never shifted : {0}".format(
+                list(non_risk_curves)))
         print("  vega      : sigma -> sigma * {0} spread over {1} x "
               "{1}".format(1.0 + vega_rel_shock, list(vega_tenor_labels)))
 
     girr = swaption_girr_for_portfolio(port, girr_tenor_days,
                                        girr_tenor_labels, shock=girr_shock)
-    curvature = swaption_curvature_for_portfolio(port, shock=curvature_shock)
+    curvature = swaption_curvature_for_portfolio(
+        port, shock=curvature_shock, non_risk_curves=non_risk_curves)
     vega = swaption_vega_for_portfolio(port, grid_days=vega_tenor_days,
                                        grid_labels=vega_tenor_labels,
                                        rel_shock=vega_rel_shock)
