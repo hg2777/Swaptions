@@ -61,6 +61,36 @@ pd.set_option('display.max_columns', None)
 VOL_TIME_BASIS = 365.0
 
 
+# 'Seller/Buyer' field: Long | Short. A short position is the same option seen
+# from the writer's side, so every reported figure -- MtM, GIRR delta,
+# curvature and vega -- carries the opposite sign. A blank field is Long, so a
+# workbook without the column is unchanged.
+POSITION_SIDE_LONG = ('long', 'buyer', 'buy', 'l', '')
+POSITION_SIDE_SHORT = ('short', 'seller', 'sell', 's')
+
+
+def parse_position_side(value):
+    '''"Short" -> -1.0, "Long" / blank -> +1.0.
+
+    An unrecognised value is rejected rather than silently defaulted: a sign
+    error is not a difference a reconciliation would attribute correctly.
+    '''
+    s = u'{0}'.format('' if value is None else value).strip().lower()
+    if s in ('nan', 'none'):
+        s = ''
+    if s in POSITION_SIDE_SHORT:
+        return -1.0
+    if s in POSITION_SIDE_LONG:
+        return 1.0
+    raise ValueError(
+        "Seller/Buyer {0!r} is neither 'Long' nor 'Short'".format(value))
+
+
+def position_sign(params):
+    '''+1.0 for a long position, -1.0 for a short one.'''
+    return parse_position_side(params.get('position_side'))
+
+
 class Swaption(object):
     '''
     European swaption on a vanilla pre-determined IRS.
