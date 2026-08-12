@@ -38,7 +38,7 @@ import pandas as pd
 
 from swaptionScenario import (FixedVolSwaption, ParallelShockedSet,
                               attach_riskwatch, build_swaption_specs,
-                              fx_factor, swaption_rw_id)
+                              fx_factor, physical_curves, swaption_rw_id)
 
 pd.set_option('display.max_columns', None)
 
@@ -54,14 +54,17 @@ CURVATURE_DOWN = 'Curvature Down'
 
 
 def swaption_curvature_long(curves, surfaces, specs, shock=CURVATURE_SHOCK,
-                            fx=None):
+                            fx=None, non_risk_curves=()):
     '''
     Long-format GIRR curvature per swaption and direction:
 
         ID | Currency | Scenario | CVR
 
-    Every curve the deal reads is shifted in parallel by +/- shock and the
-    option is repriced on its base volatility.
+    Every RISK-FACTOR curve the deal reads is shifted in parallel by +/- shock
+    and the option is repriced on its base volatility. A curve the deal reads
+    that is not a GIRR risk factor (non_risk_curves, configured in
+    swaptionMain.py) stays still: RiskWatch reports such a deal's curvature as
+    if only its remaining curves moved.
     '''
     rows = []
     for spec in specs:
@@ -69,11 +72,12 @@ def swaption_curvature_long(curves, surfaces, specs, shock=CURVATURE_SHOCK,
         vol = spec['base_vol']
         factor = fx_factor(fx, params)
         currency = u'{0}'.format(params['currency']).strip()
+        shifted_curves = physical_curves(params, non_risk_curves)
 
         v_base = FixedVolSwaption(curves, surfaces, params, vol).npv()
 
         for scenario, sign in ((CURVATURE_UP, 1.0), (CURVATURE_DOWN, -1.0)):
-            shifted = ParallelShockedSet(curves, sign * shock)
+            shifted = ParallelShockedSet(curves, sign * shock, shifted_curves)
             v = FixedVolSwaption(shifted, surfaces, params, vol).npv()
             rows.append(OrderedDict([
                 ('ID', spec['id']),
@@ -88,11 +92,13 @@ def swaption_curvature_long(curves, surfaces, specs, shock=CURVATURE_SHOCK,
     return out
 
 
-def swaption_curvature_for_portfolio(port, shock=CURVATURE_SHOCK):
+def swaption_curvature_for_portfolio(port, shock=CURVATURE_SHOCK,
+                                     non_risk_curves=()):
     '''Curvature table for an already-constructed SwaptionPortfolio.'''
     specs = build_swaption_specs(port)
     return swaption_curvature_long(port.curves, port.surfaces, specs,
-                                   shock=shock, fx=getattr(port, 'fx', None))
+                                   shock=shock, fx=getattr(port, 'fx', None),
+                                   non_risk_curves=non_risk_curves)
 
 
 def swaption_curvature_with_riskwatch(curvature_long, rw_curvature=None,
