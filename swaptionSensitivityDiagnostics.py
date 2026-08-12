@@ -131,8 +131,20 @@ def _girr_blocks(xl, row, curves, names, valuation_date, tenor_table,
     return row + 1
 
 
+def _fx_factor(params, fx):
+    '''Factor taking a deal's currency to the reporting currency; NaN when the
+    'FX rates' tab quotes no pair, so the workbook is still written for the
+    deal someone is trying to trace.'''
+    if fx is None:
+        return 1.0
+    try:
+        return fx.factor(params.get('currency', ''))
+    except KeyError:
+        return float('nan')
+
+
 def _curvature_blocks(xl, row, curves, surfaces, specs, names, shift,
-                      non_risk_curves=()):
+                      non_risk_curves=(), fx=None):
     '''Shifted curve nodes per altered curve, then the per-deal CVR trace.
 
     Mirrors swaptionCurvature: a curve the deal reads that is not a GIRR risk
@@ -160,18 +172,23 @@ def _curvature_blocks(xl, row, curves, surfaces, specs, names, shift,
                               surfaces, params, vol).npv()
         down = FixedVolSwaption(ParallelShockedSet(curves, -shift, shifted_curves),
                                 surfaces, params, vol).npv()
+        # MtMs are the deal's own currency (the pricer's); the CVR columns
+        # carry the FX factor so they match the Curvature tab, which the
+        # sensitivity pass reports in the reporting currency.
+        f = _fx_factor(params, fx)
         rows.append([spec['id'], params.get('currency', ''), vol,
-                     round(base, 2), round(up, 2), round(down, 2),
-                     round(up - base, 2), round(down - base, 2)])
+                     round(base, 2), round(up, 2), round(down, 2), f,
+                     round((up - base) * f, 2), round((down - base) * f, 2)])
 
     row = _put(xl, SENSITIVITY_SHEET, row, pd.DataFrame(
         rows, columns=['ID', 'Currency', 'Volatility', 'MtM Base', 'MtM Up',
-                       'MtM Down', CURVATURE_UP, CURVATURE_DOWN]))
+                       'MtM Down', 'FX to reporting',
+                       CURVATURE_UP, CURVATURE_DOWN]))
     return row + 2
 
 
 def _vega_blocks(xl, row, curves, surfaces, specs, grid_days, grid_labels,
-                 rel_shock):
+                 rel_shock, fx=None):
     '''Per-deal vega P&L trace, then the (option term x swap duration) grid.'''
     row = _section(xl, row, 'VEGA : sigma -> sigma * {0}, spread over '
                             '{1}'.format(1.0 + rel_shock, list(grid_labels)))
@@ -184,11 +201,14 @@ def _vega_blocks(xl, row, curves, surfaces, specs, grid_days, grid_labels,
         base = FixedVolSwaption(curves, surfaces, params, vol).npv()
         up = FixedVolSwaption(curves, surfaces, params,
                               vol * (1.0 + rel_shock)).npv()
-        vega_pl = (up - base) / rel_shock
+        # MtMs stay in the deal's currency; the vega P&L carries the FX
+        # factor so it matches the Vega tab.
+        f = _fx_factor(params, fx)
+        vega_pl = (up - base) / rel_shock * f
 
         trace.append([spec['id'], u'{0}'.format(
             params['vol_surface_name']).strip(), vol, vol * (1.0 + rel_shock),
-            option_days, duration_days, round(base, 2), round(up, 2),
+            option_days, duration_days, round(base, 2), round(up, 2), f,
             round(vega_pl, 2)])
 
         for o_label, o_w in vega_tenor_weights(option_days, grid_days,
@@ -201,7 +221,8 @@ def _vega_blocks(xl, row, curves, surfaces, specs, grid_days, grid_labels,
     row = _put(xl, SENSITIVITY_SHEET, row, pd.DataFrame(
         trace, columns=['ID', 'Surface', 'Volatility', 'Volatility Shocked',
                         'Option Term (days)', 'Swap Duration (days)',
-                        'MtM Base', 'MtM Shocked', 'Vega PL']))
+                        'MtM Base', 'MtM Shocked', 'FX to reporting',
+                        'Vega PL']))
     row += 1
     row = _put(xl, SENSITIVITY_SHEET, row, pd.DataFrame(
         grid, columns=['ID', 'Option Term', 'Option Weight', 'Swap Duration',
@@ -285,10 +306,11 @@ def write_swaption_sensitivity_diagnostics(
         r = 0
         r = _girr_blocks(xl, r, curves, names, port.valuation_date,
                          tenor_table, method, girr_shock)
+        fx = getattr(port, 'fx', None)
         r = _curvature_blocks(xl, r, curves, surfaces, specs, names,
-                              curvature_shock, non_risk_curves)
+                              curvature_shock, non_risk_curves, fx)
         r = _vega_blocks(xl, r, curves, surfaces, specs, vega_tenor_days,
-                         vega_tenor_labels, vega_rel_shock)
+                         vega_tenor_labels, vega_rel_shock, fx)
 
     if verbose:
         print('[swaptionSensitivityDiagnostics] wrote {0}  (tabs: {1}, {2}) '
