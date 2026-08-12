@@ -35,12 +35,34 @@ Targets Python 2.7 (no f-strings, explicit float division, object base).
 import numpy as np
 import pandas as pd
 
-from swaptionPricing import Swaption
+from swaptionPricing import Swaption, position_sign
 
 pd.set_option('display.max_columns', None)
 
 # RiskWatch tags swaption rows of the FRTB SA report as "SWO <DealNum>".
 RW_SWAPTION_PREFIX = 'SWO'
+
+# Below this ABSOLUTE size a sensitivity is not a number either engine can
+# print meaningfully: it is the residue of cancelling ~16 significant figures
+# of a PV, not risk. Where OUR figure and RiskWatch's are both this small the
+# cell is an agreed zero and its error is reported as 0.0, rather than as one
+# engine's residue divided by the other's (which reads as -173% on a pair like
+# -1.9e-05 against +2.6e-05).
+NEGLIGIBLE_ABS_TOL = 0.0001
+
+
+def reporting_factor(fx, params):
+    '''The single multiplier taking a computed figure to a reported one: the
+    FX factor into the reporting currency, times the position sign.'''
+    return fx_factor(fx, params) * position_sign(params)
+
+
+def negligible_agreed(ours, rw, abs_tol=NEGLIGIBLE_ABS_TOL):
+    '''True where both sides are present and both are smaller than abs_tol --
+    an analytic zero both engines report as cancellation residue.'''
+    o = pd.to_numeric(ours, errors='coerce').abs()
+    r = pd.to_numeric(rw, errors='coerce').abs()
+    return (o < abs_tol) & (r < abs_tol) & o.notna() & r.notna()
 
 
 # ---------------------------------------------------------------------------
