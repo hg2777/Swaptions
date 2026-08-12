@@ -92,20 +92,30 @@ class CurveShockedSet(object):
 
 class ParallelShockedSet(object):
     '''
-    Wrap a CurveSet and add a constant parallel shift to EVERY curve.
+    Wrap a CurveSet and add a constant parallel shift to its curves.
 
     RiskWatch's GIRR curvature risk factor sits at the currency bucket, not at
     a single curve (its Risk Factor ID is 'EUR' / 'USD' with no vertex), so
-    the discount curve and the forecast curve shift together and the option is
+    every curve carrying that bucket's risk shifts together and the option is
     repriced once per direction.
+
+    `names` limits the shift to those curves; None shifts every curve. A curve
+    the deal READS without it being a GIRR risk factor has to be left still --
+    it is a projection input, and shifting it would load its move onto the
+    currency bucket (see physical_curves).
     '''
 
-    def __init__(self, base, shift):
+    def __init__(self, base, shift, names=None):
         self._base = base
         self._shift = float(shift)
+        self._names = None if names is None else set(
+            u'{0}'.format(n).strip() for n in names)
 
     def rate(self, curve_name, t_days):
         z = self._base.rate(curve_name, t_days)
+        if self._names is not None and \
+                u'{0}'.format(curve_name).strip() not in self._names:
+            return z
         return np.asarray(z, dtype=float) + self._shift
 
     def __getattr__(self, name):
@@ -146,12 +156,28 @@ def fx_factor(fx, params):
     return fx.factor(params['currency'])
 
 
-def physical_curves(params):
-    '''Distinct physical curves the deal reads, in role order.'''
+def physical_curves(params, non_risk=()):
+    '''
+    Distinct physical curves the deal reads, in role order, less any named in
+    `non_risk`.
+
+    A curve can be READ by the pricer without being a GIRR RISK FACTOR.
+    'EUR-SWP-1M' is one: it appears nowhere in the FRTB SA report's 42 GIRR
+    Risk Factor IDs, and RiskWatch publishes only EUR-SWP delta rows for the
+    deal that forecasts off it. Its own curvature confirms the same -- shifting
+    the deal's discount curve alone reproduces RiskWatch exactly, while
+    shifting the forecast curve with it misses by 2300%.
+
+    The list is configured in swaptionMain.py and is passed by the CURVATURE
+    pass only. The GIRR delta pass still shocks every curve the deal reads and
+    reports a row per curve, so a computed sensitivity is never dropped for
+    want of a RiskWatch counterpart; those rows simply reconcile to N/A.
+    '''
+    skip = set(u'{0}'.format(n).strip() for n in non_risk)
     phys = []
     for c in (u'{0}'.format(params['discount_curve']).strip(),
               u'{0}'.format(params['forecast_curve']).strip()):
-        if c and c not in phys:
+        if c and c not in phys and c not in skip:
             phys.append(c)
     return phys
 
