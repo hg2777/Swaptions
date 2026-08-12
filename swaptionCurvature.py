@@ -36,9 +36,11 @@ from collections import OrderedDict
 
 import pandas as pd
 
-from swaptionScenario import (FixedVolSwaption, ParallelShockedSet,
-                              attach_riskwatch, build_swaption_specs,
-                              fx_factor, physical_curves, swaption_rw_id)
+from swaptionScenario import (NEGLIGIBLE_ABS_TOL, FixedVolSwaption,
+                              ParallelShockedSet, attach_riskwatch,
+                              build_swaption_specs, negligible_agreed,
+                              physical_curves, reporting_factor,
+                              swaption_rw_id)
 
 pd.set_option('display.max_columns', None)
 
@@ -70,7 +72,7 @@ def swaption_curvature_long(curves, surfaces, specs, shock=CURVATURE_SHOCK,
     for spec in specs:
         params = spec['params']
         vol = spec['base_vol']
-        factor = fx_factor(fx, params)
+        factor = reporting_factor(fx, params)
         currency = u'{0}'.format(params['currency']).strip()
         shifted_curves = physical_curves(params, non_risk_curves)
 
@@ -122,6 +124,10 @@ def swaption_curvature_with_riskwatch(curvature_long, rw_curvature=None,
         rw_vals = [rw_curvature.get(swaption_rw_id(d), {}).get(s)
                    for d, s in zip(out['ID'], out['Scenario'])]
         out = attach_riskwatch(out, 'CVR-UAT', rw_vals, sens_round, pct_round)
+        # both sides negligible -> an agreed zero, not a percentage of noise
+        out.loc[negligible_agreed(out['CVR-UAT'], out['CVR-RiskWatch'],
+                                  NEGLIGIBLE_ABS_TOL),
+                '(CVR-UAT/RW-1)%'] = 0.0
 
     return (out.sort_values(['ID', 'Scenario'], kind='mergesort')
                .reset_index(drop=True))
